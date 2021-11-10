@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>An introduction to Clickhouse Architecture and Performance</title>
+    <meta charset="utf-8">
+    <meta http-equiv="x-ua-compatible" content="ie=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="shower/themes/yandex/styles/screen-4x3.css">
+
+    <style type="text/css">
+         code { display: block; white-space: pre; background-color: #EEE; }
+         p.cloud { text-align: center; line-height: 1.5; }
+         p.cloud span { font-size: 13pt; color: gray; padding: 0 20px 0 20px; white-space: nowrap; }
+    </style>
+</head>
+<body class="shower list">
+    <header class="caption">
+        <h1>An introduction to Clickhouse Architecture and Performance</h1>
+    </header>
+
+    <section class="slide" id="cover">
+        <h1 style="margin-top: 150px; font-size: 42pt; line-height: 150%;"><span style="background: rgba(255, 255, 255, 0.75)">An introduction to Clickhouse Architecture and Performance</span></h1>
+        <p style="margin-top: 50px; margin-left: 330px;">a.k.a. How To Write Efficient Code</p>
+    </section>
+
+<section class="slide">
+    <h2>Two types of Data Engines</h2>
+    <p>&mdash; Data & Computation in the same place (Clickhouse, Spark...)</p>
+    <p>&mdash; Data & Computation are in different places (MySQL + Whatever)</p>
+</section>
+           
+<section class="slide">
+    <h2 style="font-size: 32pt;">What is ClickHouse?</h2>
+    <p>Open-source distributed analytical DBMS.</p>
+    <p><a href="https://github.com/ClickHouse/ClickHouse/">https://github.com/ClickHouse/ClickHouse/</a></p>
+    <p>Used in: CARTO, Mercadona, Zara, Idealista, Corunet, ... Cloudflare, Spotify, Amadeus, Bloomberg, Cisco, Deutsche Bank, Tencent, ByteDance...</p>
+</section>
+
+<section class="slide">
+<h2>Design Principles</h2>
+<p style="font-size: 36pt;">"top-down"
+<br/>or "bottom-up" design?</p>
+</section>
+
+<section class="slide">
+<h2>Design Principles</h2>
+<img style="float: right; height: 60%; margin-left: -60px; margin-top: -60px; margin-right: -60px;" src="pictures/not_optimal.webp"/>
+<p style="font-size: 24pt;"><b>Top-Down</b>:</p>
+<p>&mdash; choose a high-level architecture;</p>
+<p>&mdash; choose what classes will be in the codebase;</p>
+<p>&mdash; draw some diagrams;</p>
+</section>
+
+<section class="slide">
+<h2>Design Principles</h2>
+<img style="float: left; height: 60%; margin-left: -60px; margin-top: -60px; margin-right: 20px;" src="pictures/optimal.webp"/>
+<p style="font-size: 24pt;"><b>Bottom-Up</b>:</p>
+<p>&mdash; how the inner loop in my code will work?</p>
+<p>&mdash; what is the data layout in memory?</p>
+<p>&mdash; what bytes are read/written and where?</p>
+</section>
+
+<section class="slide">
+<h2>How ClickHouse was Designed</h2>
+<p>ClickHouse was developed from a prototype,<br/>
+implemented in year 2008<br/>
+that was intended to solve <b>just a single task</b>:<br/>
+&mdash; to filter and aggregate data <b>as fast as possible</b>.</p>
+<p>&mdash; in other words, just to do <b>GROUP BY</b>.</p>
+<p><a href="http://highscalability.com/blog/2017/9/18/evolution-of-data-structures-in-yandexmetrica.html">http://highscalability.com/blog/2017/9/18/evolution-of-data-structures-in-yandexmetrica.html</a></p>
+</section>
+
+<section class="slide">
+<h2>Design From Hardware Capabilities</h2>
+<p>1. What are the basic numbers (throughput, latency, volume...) 
+<br/>&emsp;of our hardware (CPU, RAM, SSD, HDD, network...)
+<br/>&emsp;on what operations?</p>
+<p>2. What are the data structures we use?
+<br/>&emsp;and how the work with our hardware?</p>
+<p>3. and do some basic math...</p>
+</section>
+
+<section class="slide">
+<h2>Design From Hardware Capabilities</h2>
+<p>Example:</p>
+<p>&mdash; we will do GROUP BY in memory;</p>
+<p>&mdash; will put all data in a hash table;</p>
+<p>&mdash; if the hash table is large, it will not fit in L3 cache of CPU;</p>
+<p>&mdash; if the values of GROUP BY keys are not distributed locally,<br/>&emsp; then we have L3 cache miss for every row in a table;</p>
+<p>&mdash; L3 cache miss has 70..100 ns <b>latency</b>;</p>
+<p>How many keys per second we can process?</p>
+</section>
+
+<section class="slide">
+<h2>Design From Hardware Capabilities</h2>
+<p>Example:</p>
+<code style="font-size: 32pt;">SELECT rand() % 10000000 AS k
+    FROM system.numbers_mt
+    GROUP BY k</code>
+<p style="margin-top: 1em;"><b>175.52</b> million rows/s.</p>
+</section>
+
+<section class="slide">
+    <h2>How to store data?</h2>
+    <p>Big data processing is not a problem.</p>
+    <p>The challenge is how to store data in that way to allow both:</p>
+    <p>- efficient ingestion of click stream in realtime;</p>
+    <p>- efficient generation of reports;</p>
+    <p>&nbsp;</p>
+    <p>Let review our historical solutions first...</p>
+</section>
+
+<section class="slide">
+    <h2>MySQL (MyISAM) 2008-2011</h2>
+    <p>We have had about 50 predefined report types.</p>
+    <p>We create a table for each of them.</p>
+    <p>Each table has primary key in form of:</p>
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;site_id, date, <i>key</i> -> aggregated statistics.</p>
+    <p>The data was inserted in mini-batches of aggregated deltas,<br/>using ON DUPLICATE KEY UPDATE.</p>
+    <p>&nbsp;</p>
+    <p>... but this just don't work.</p>
+</section>
+
+<section class="slide">
+    <h2>Data locality on disk (artistic view)</h2>
+    <p>The main concern is <b>data locality</b>.</p>
+    <img src="pictures/data_locality.png" style="width:100%"/>
+</section>
+
+<section class="slide">
+    <h2>MySQL (MyISAM) 2008-2011</h2>
+    <p>We use HDD (rotational drives).<br/>We cannot afford petabytes of SSDs.</p>
+    <p>Each seek is ~12 ms of latency,<br/> usually no more than 1000 random reads/second in RAID array.</p>
+
+    <p>Time to read data from disk array is dependent on:<br />- number of seeks;<br />- total amount of data;</p>
+
+    <p>Example: read 100&nbsp;000 rows, randomly scattered on disk:<br />- at least 100 seconds in worst case.<br />User won't wait hundred seconds for the report.</p>
+
+    <p>The only way to read data from disk array in appropriate amount of time is to minimize number of seek by maintaining data locality.</p>
+</section>
+
+<section class="slide">
+    <h2>MySQL (MyISAM) 2008-2011</h2>
+    <p>Fundamental problem:</p>
+
+    <p>Data is <b>inserted</b> almost in time order:
+    <br />- each second we have new portion data for this second;
+    <br />- but data for different web sites are comes in random order in a stream;</p>
+
+    <p>Data is <b>selected</b> by ranges for specified web site and date period:
+    <br />- in ranges of completely different order;</p>
+</section>
+
+<section class="slide">
+    <h2>MySQL (MyISAM) 2008-2011</h2>
+    <p>MyISAM stores data in MYD and MYI files.<br/>MYD contains data almost in order of insertion.<br/>MYI contains B-tree index that maps a key to offset in MYD file.</p>
+    <p>Insertion of data is almost fine.<br />But selecting of data by range of primary key was non-practical.</p>
+    <p>Nevertheless, we made it work by:</p>
+    <p>
+    - tricky partitioning;<br/>
+    - organizing data in few generations with different partitioning scheme;<br/>
+    - moving data between tables by scheduled scripts;<br/>
+    - report generation becomes ugly UNION ALL queries.</p>
+</section>
+
+<section class="slide">
+    <h2>Aggregated vs. raw data</h2>
+    <p>Users are not satisfied with 50 predefined reports.</p>
+    <p>Everyone wants deep ad-hoc analytics with custom reports<br/>&mdash; to slice and dice data by any dimension.</p>
+    <p>This is only possible with non-aggregated data.</p>
+</section>
+
+<section class="slide">
+    <h2>The report builder, 2010</h2>
+    <p>We had quickly made a prototype of so-called "report&nbsp;builder".</p>
+    <p>This was 2010 year. It was just simple specialized column-oriented data structure.</p>
+    <p>It worked fine and we got understanding, what the right direction to go.</p>
+    <p>We need good column-oriented DBMS.</p>
+</section>
+
+<section class="slide">
+    <h2>Why column-oriented?</h2>
+    <p>This is how "traditional" row-oriented databases work:</p>
+    <p><img src="pictures/row_oriented.gif"/></p>
+</section>
+
+<section class="slide">
+    <h2>Why column-oriented?</h2>
+    <p>And this is how column-oriented databases work:</p>
+    <p><img src="pictures/column_oriented.gif"/></p>
+</section>
+
+<section class="slide">
+    <h2>Why column-oriented?</h2>
+    <p>Hypothesis:</p>
+    <p>If we have good enough column-oriented DBMS,<br/>we could store all our data in non-aggregated form<br/>(raw pageviews and sessions) and generate all the reports on the fly,<br />to allow infinite customization.</p>
+    <p>To check this hypothesis, we started to evaluate existing solutions.</p>
+    <p>MonetDB, InfiniDB, Vertica, Infobright and so on...</p>
+    <p>No appropriate solutions were exist in 2010.</p>
+</section>
+
+<section class="slide">
+    <h2>ClickHouse</h2>
+    <p>As an experimental project, we started to develop<br />our own column-oriented DBMS: ClickHouse.</p>
+    <p>In 2012 it was in production state.</p>
+    <p>In 2014 we re-lauched Yandex.Metrica as Metrica 2.</p>
+    <p>All data is stored in ClickHouse and in non-aggregated form<br />and every report is generated on the fly.</p>
+    <p>In Metrika 2 the user could create it's own report with<br />
+    - custom dimensions, metrics, filters, user-centric segmentation...<br/>
+    - and to dig through data to the detail of individual visitors.</p>
+</section>
+
+<section class="slide">
+    <h2>ClickHouse</h2>
+    <p>The main target for ClickHouse is query execution speed.</p>
+    <p>In Yandex.Metrika, users could analyze data for their web sites of any volume.</p>
+    <p>Biggest classifieds and e-commerce sites with hundreds millions PV/day are using Yandex.Metrika (e.g. ru.aliexpress.com).</p>
+    <p>In contrast to GA*, in Yandex.Metrika, you could get data reports for large web sites without sampling.</p>
+    <p>As data is processed on the fly, ClickHouse must be able to crunch all that pageviews in sub second time.</p>
+    <p style="font-size:60%; margin-top:2em">* in Google Analytics you could get reports without sampling only in "premium" version.</p>
+</section>
+
+<section class="slide">
+    <h2>The main cluster of Yandex.Metrica</h2>
+    <ul style="font-size:30px;">
+        <li>22 trillions of rows (as of May 2017)</li>
+        <li>472 servers</li>
+        <li>total throughput of query processing is up to two terabytes per second</li>
+    </ul>
+    <p style="font-size:60%; margin-top:2em">* If you want to try ClickHouse, one server or VM is enough.</p>
+</section>
+
+<section class="slide">
+    <h2>ClickHouse</h2>
+    <ul>
+        <li>column-oriented</li>
+        <li>distributed (including cross-DC replication)</li>
+        <li>linearly scalable</li>
+        <li>fault-tolerant</li>
+        <li>data ingestion in realtime</li>
+        <li>realtime (sub-second) queries</li>
+        <li>support of SQL dialect + extensions<br/>(arrays, nested data types, domain-specific functions, approximate query execution)</li>
+    </ul>
+</section>
+
+<section class="slide">
+    <h2>When to use ClickHouse</h2>
+    <p>For well structured, clean, <strong style="background-color: yellow;">immutable events</strong>.</p>
+    <p>&nbsp;</p>
+    <p>Click stream. Web analytics. Adv. networks. RTB. E-commerce.</p>
+    <p>Analytics for online games. <span style="background-color: yellow;">Sensor and monitoring data</span>. Telecom&nbsp;data.</p>
+    <p><span style="background-color: yellow;">Structured logs</span>.</p>
+</section>
+
+<section class="slide">
+    <h2 style="font-size: 40px;">When <span style="color:red;">not</span> to use ClickHouse</h2>
+    <p><span style="font-size: 30px;color: #888;">OLTP</span><br/>ClickHouse <span style="color:red;">doesn't have UPDATE statement and full-featured transactions</span>.</p>
+    <p><span style="font-size: 30px;color: #888;">Key-Value</span><br/>If you want high load of small single-row queries, please use another system.</p>
+    <p><span style="font-size: 30px;color: #888;">Blob-store, document oriented</span><br/>ClickHouse is intended for vast amount of fine-grained data.</p>
+    <p><span style="font-size: 30px;color: #888;">Over-normalized data</span><br/>Better to make up single wide fact table with pre-joined dimensions.</p>
+</section>
+
+
+<section class="slide">
+    <h2>Open-source (since June 2016)</h2>
+    <p>We think ClickHouse is too good to be used solely by Yandex.</p>
+    <p>We made it open-source. License: Apache 2.0.</p>
+    <p>https://github.com/ClickHouse/ClickHouse/</p>
+</section>
+
+<section class="slide">
+<h2>Design From Hardware Capabilities</h2>
+<p>L3 cache miss has throughput of 40 million ops/sec. on a single CPU core</p>
+<p>and ~ 500 million. ops/sec*. on 32 hyper-threading CPU cores<br/>(Xeon E5-2650v2).</p>
+<p style="margin-top: 2em;">Never mess up <b>latency</b> and <b>throughput</b>!</p>
+<p style="margin-top: 5em; font-size: 80%; color: gray;">* but we have just 175 million rows per second. Is ClickHouse slow?</p>
+</section>
+
+<section class="slide">
+<h2 style="font-size: 36pt;">Algorithms First, Abstractions Go After</h2>   <!-- Check wording -->
+<p>If you need maximum performance<br/>
+&mdash; <b>then interfaces in the code are determined by algorithms</b>!</p>
+<p>You can choose different algorithms for each table of your database</p>
+</section>
+
+<section class="slide">
+    <h2>Why ClickHouse is so fast?</h2>
+    <p>&nbsp;</p>
+    <p style="font-size: 40px;">&mdash; we just cannot make it slower.</p>
+    <p style="font-size: 40px;">Yandex.Metrica must work.</p>
+</section>
+
+<section class="slide">
+    <h2>Why ClickHouse is so fast?</h2>
+    <p><b>Algorithmic optimizations.</b></p>
+    <p>MergeTree, locality of data on disk<br/>— fast range queries.</p>
+    <p>Example: uniqCombined function is a combination of three different data structures, used for different ranges of cardinalities.</p>
+    <p><b>Low-level optimizations.</b></p>
+    <p>Example: vectorized query execution.</p>
+    <p><b>Specialization and attention to detail.</b></p>
+    <p>Example: we have 17 different algorithms for GROUP BY. Best one is selected for your query.</p>
+</section>
+
+<section class="slide">
+    <h2>ClickHouse vs. Spark</h2>
+    <p>https://www.percona.com/blog/2017/02/13/clickhouse-new-opensource-columnar-database/</p>
+    <img src="pictures/spark.png" style="height:60%"/>
+</section>
+
+<section class="slide">
+    <h2>Elasticsearch</h2>
+    <p>- fine if all indices fit in RAM;</p>
+    <p>- high disk usage for data and indices;</p>
+    <p>- almost not possible to use after some data volume threshold;</p>
+    <p>- slow scans.</p>
+</section>
+
+<section class="slide">
+    <h2>Spark SQL</h2>
+    <p>- Spark is fine as a platform for data transformations;</p>
+    <p>- not possible to ingest data in realtime while maintaining fast range scans - need to apply tricky partitioning and manual merging;</p>
+    <p>- scans are relatively fast, though slower than ClickHouse;</p>
+</section>
+
+<section class="slide">
+    <h2>Cassandra</h2>
+    <p>- good for semistructured data;</p>
+    <p>- slow scans, no complex analytical queries;</p>
+</section>
+
+<section class="slide">
+    <h2>Clickhouse Philosophy</h2>
+    <p>- Interactive queries on data updated in real time;</p>
+    <p>- Cleaned structured data is needed;</p>
+    <p>- Try hard not to pre-aggregate anything;</p>
+    <p>- Query language: a dialect of SQL + extensions</p>
+</section>
+
+<section class="slide">
+    <h2>How to execute a query fast?</h2>
+    <p>Read Data Fast</p>
+    <p>- Use only the columns you need</p>
+    <p>- Locality of reads (an index is needed!)</p>
+    <p>- Data compression (LZ4 + sampling to determine the best settings... multi-armed bandits algorithm)</p>
+    <p>Process Data Fast</p>
+    <p>- Vecotorized execution (block-based processing)</p>
+    <p>Parallelize to all available cores and machines</p>
+    <p>Specialization and low-level optimizations</p>
+</section>
+
+<section class="slide">
+    <h2>Index Needed!</h2>
+    <p>The principle is the same as with classic DBMSes</p>
+    <p>Differences</p>
+    <p>- The table will be physically sorted on disk</p>
+    <p>- Is not a unique constraint</p>
+</section>
+
+<section class="slide">
+    <h2>Index Internals</h2>
+    <p><img src="pictures/index_internals.png" alt="Index Internals" style="width:100%"></p>
+</section>
+
+<section class="slide">
+    <p><img src="pictures/slides-9.png" alt="Borrowed slides" style="width:100%"></p>
+</section>
+
+<section class="slide">
+    <p><img src="pictures/slides-10.png" alt="Borrowed slides" style="width:100%"></p>
+</section>
+
+<section class="slide">
+    <p><img src="pictures/slides-11.png" alt="Borrowed slides" style="width:100%"></p>
+</section>
+
+<section class="slide">
+    <p><img src="pictures/slides-12.png" alt="Borrowed slides" style="width:100%"></p>
+</section>
+
+<section class="slide">
+    <p><img src="pictures/slides-13.png" alt="Borrowed slides" style="width:100%"></p>
+</section>
+
+<section class="slide">
+    <p><img src="pictures/slides-14.png" alt="Borrowed slides" style="width:100%"></p>
+</section>
+
+<section class="slide">
+    <p><img src="pictures/slides-15.png" alt="Borrowed slides" style="width:100%"></p>
+</section>
+
+<section class="slide">
+    <p><img src="pictures/slides-16.png" alt="Borrowed slides" style="width:100%"></p>
+</section>
+
+<section class="slide">
+    <p><img src="pictures/slides-17.png" alt="Borrowed slides" style="width:100%"></p>
+</section>
+
+<section class="slide">
+    <p><img src="pictures/slides-18.png" alt="Borrowed slides" style="width:100%"></p>
+</section>
+
+<section class="slide">
+    <p><img src="pictures/slides-20.png" alt="Borrowed slides" style="width:100%"></p>
+</section>
+
+<section class="slide">
+    <p><img src="pictures/slides-21.png" alt="Borrowed slides" style="width:100%"></p>
+</section>
+
+<section class="slide">
+    <p><img src="pictures/slides-22.png" alt="Borrowed slides" style="width:100%"></p>
+</section>
+
+<section class="slide">
+    <p><img src="pictures/slides-23.png" alt="Borrowed slides" style="width:100%"></p>
+</section>
+
+<section class="slide">
+    <p><img src="pictures/slides-24.png" alt="Borrowed slides" style="width:100%"></p>
+</section>
+
+<section class="slide">
+    <p><img src="pictures/slides-25.png" alt="Borrowed slides" style="width:100%"></p>
+</section>
+
+<section class="slide">
+    <p><img src="pictures/slides-26.png" alt="Borrowed slides" style="width:100%"></p>
+</section>
+
+<section class="slide">
+    <p><img src="pictures/slides-28.png" alt="Borrowed slides" style="width:100%"></p>
+</section>
+
+<section class="slide">
+    <p><img src="pictures/slides-30.png" alt="Borrowed slides" style="width:100%"></p>
+</section>
+
+<section class="slide">
+    <p><img src="pictures/slides-31.png" alt="Borrowed slides" style="width:100%"></p>
+</section>
+
+<section class="slide">
+    <p><img src="pictures/slides-32.png" alt="Borrowed slides" style="width:100%"></p>
+</section>
+
+<section class="slide">
+    <h2 style="font-size: 36pt;">Algorithms First, Abstractions Go After</h2>
+    <p>Example: substring search:</p>
+    <p>&mdash; in C: <b>strstr</b>, <b>memmem</b>;</p>
+    <p>&mdash; in C++: <b>std::search</b>, <b>std::string::find</b>.</p>
+    <p>But these functions are <b style="color: red;">slow</b>! (in some usage scenario).</p>
+    </section>
+    
+    <section class="slide">
+    <h2 style="font-size: 36pt;">Algorithms First, Abstractions Go After</h2>
+    <p>Substring Search:</p>
+    <code style="margin-left: -15px; margin-right: -15px;">void * memmem(const void * haystack, size_t haystacklen,
+                  const void * needle, size_t needlelen);</code>
+    <p style="margin-top: 1em;">&mdash; there is no separate initialization routine;
+    <br/>&mdash; required to be reentrable &mdash; cannot allocate memory.</p>
+    <p>But what if we search a single <b>needle</b> in 1&nbsp;000&nbsp;000 different <b>haystack</b>s?</p>
+    <code style="margin-left: -15px; margin-right: -15px;">Searcher searcher(needle);
+    for (const auto &amp; haystack : haystacks)
+        searcher.search(haystack);</code>
+    </section>
+    
+    <section class="slide">
+    <h2 style="font-size: 36pt;">Algorithms First, Abstractions Go After</h2>
+    <h3>WE WON'T GO DOWN THAT RABBIT HOLE IN THIS PRESENTATION</h3>
+    </section>
+    
+    <section class="slide">
+    <p class="cloud" style="margin-top: 30px;">
+    <span>Brute Force algorithm</span>
+    <span>Deterministic Finite Automaton algorithm</span>
+    <span>Karp-Rabin algorithm</span>
+    <span>Shift Or algorithm</span>
+    <span>Morris-Pratt algorithm</span>
+    <span>Knuth-Morris-Pratt algorithm</span>
+    <span>Simon algorithm</span>
+    <span>Colussi algorithm</span>
+    <span>Galil-Giancarlo algorithm</span>
+    <span>Apostolico-Crochemore algorithm</span>
+    <span>Not So Naive algorithm</span>
+    <span>Boyer-Moore algorithm</span>
+    <span>Turbo BM algorithm</span>
+    <span>Apostolico-Giancarlo algorithm</span>
+    <span>Reverse Colussi algorithm</span>
+    <span>Horspool algorithm</span>
+    <span>Quick Search algorithm</span>
+    <span>Tuned Boyer-Moore algorithm</span>
+    <span>Zhu-Takaoka algorithm</span>
+    <span>Berry-Ravindran algorithm</span>
+    <span>Smith algorithm</span>
+    <span>Raita algorithm</span>
+    <span>Reverse Factor algorithm</span>
+    <span>Turbo Reverse Factor algorithm</span>
+    <span>Forward Dawg Matching algorithm</span>
+    <span>Backward Nondeterministic Dawg Matching algorithm</span>
+    <span>Backward Oracle Matching algorithm</span>
+    <span>Galil-Seiferas algorithm</span>
+    <span>Two Way algorithm</span>
+    <span>String Matching on Ordered Alphabets algorithm</span>
+    <span>Optimal Mismatch algorithm</span>
+    <span>Maximal Shift algorithm</span>
+    <span>Skip Search algorithm</span>
+    <span>KMP Skip Search algorithm</span>
+    <span>Alpha Skip Search algorithm</span>
+    </p>
+    <p><a href="https://www-igm.univ-mlv.fr/~lecroq/string/">https://www-igm.univ-mlv.fr/~lecroq/string/</a></p>
+    <p>But none of these algorithms are used in ClickHouse!</p>
+    </section>
+    
+    <section class="slide">
+    <h2 style="font-size: 28pt;">Algorithms Know About Data Distribution</h2>
+    <code style="font-size: 12pt; margin-top: -1em;">#ifdef __SSE2__
+    /** A slightly more optimized version.
+      * Based on the assumption that often sequences of consecutive values
+      *  completely pass or do not pass the filter.
+      * Therefore, we will optimistically check the sequences of SIMD_BYTES values.
+      */
+    
+    static constexpr size_t SIMD_BYTES = 16;
+    const __m128i zero16 = _mm_setzero_si128();
+    const UInt8 * filt_end_sse = filt_pos + size / SIMD_BYTES * SIMD_BYTES;
+    
+    while (filt_pos &lt; filt_end_sse)
+    {
+        int mask = _mm_movemask_epi8(
+            _mm_cmpgt_epi8(
+                _mm_loadu_si128(reinterpret_cast<const __m128i *>(filt_pos)), zero16));
+    
+        if (0 == mask)
+        {
+            /// Nothing is inserted.
+        }
+        else if (0xFFFF == mask)
+        {
+            res_data.insert(data_pos, data_pos + SIMD_BYTES);
+        }
+        else
+    </code>
+    </section>
+    
+    <section class="slide">
+    <h2 style="font-size: 28pt;">Algorithms Know About Data Distribution</h2>
+    <code style="font-size: 12pt; margin-top: -1em; line-height: 1.1;">static inline int digits10(uint128_t x)
+    {
+        if (x &lt; 10ULL)
+            return 1;
+        if (x &lt; 100ULL)
+            return 2;
+        if (x &lt; 1000ULL)
+            return 3;
+    
+        if (x &lt; 1000000000000ULL)
+        {
+            if (x &lt; 100000000ULL)
+            {
+                if (x &lt; 1000000ULL)
+                {
+                    if (x &lt; 10000ULL)
+                        return 4;
+                    else
+                        return 5 + (x >= 100000ULL);
+                }
+    
+                return 7 + (x >= 10000000ULL);
+            }
+    
+            if (x &lt; 10000000000ULL)
+                return 9 + (x >= 1000000000ULL);
+    
+            return 11 + (x >= 100000000000ULL);
+        }
+    
+        return 12 + digits10(x / 1000000000000ULL);
+    }
+    </code>
+    </section>
+    
+    <section class="slide">
+    <h2 style="font-size: 28pt;">Algorithms Learn On Data Dynamically</h2>
+    <video style="width: 100%;"><source src="video/bandits.ogv" type="video/ogg"></video>
+    <p style="font-size: 12pt; color: #888;">Source: <a href="https://learnforeverlearn.com/bandits/">https://learnforeverlearn.com/bandits/</a></p>
+    </section>
+    
+    <section class="slide">
+    <h2>Multi-Armed Bandits</h2>
+    
+    <p>&mdash; select from different options randomly;</p>
+    <p>&mdash; calculate statistics for each option;</p>
+    <p>&mdash; consider the time (exec speed) for each option as a random variable;</p>
+    <p>&mdash; estimate the distribution of time for each variant;</p>
+    </section>
+    
+    <section class="slide">
+    <h2>Thompson Sampling</h2>
+    <p>&mdash; sample from random variable for each option;</p>
+    <p>&mdash; choose the option for which the sampled value is better.</p>
+    <p>This method is used to optimize LZ4 decompression in ClickHouse.</p>
+    <p><a href="https://habr.com/en/company/yandex/blog/457612/">https://habr.com/en/company/yandex/blog/457612/</a>
+    </section>
+    
+<section class="slide">
+    <p><img src="pictures/slides-33.png" alt="Borrowed slides" style="width:100%"></p>
+</section>
+
+
+</body>
+</html>
