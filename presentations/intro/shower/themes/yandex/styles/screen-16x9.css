@@ -93,7 +93,7 @@ a{text-decoration:none}
 .caption h1{padding-bottom:.15em;font:1em/2 Yandex Sans Display Web,sans-serif}
 .caption p{font-size:.6em}
 .caption a{color:#4b86c2;text-shadow:0 -1px 0 #1f3f60}
-.slide{position:relative;z-index:1;overflow:hidden;padding:20px 100px 0;width:1024px;height:576px;background: #FFF url('../../../../pictures/inner.png') no-repeat right bottom; background-size: 100%; font-size:25px}
+/*.slide{position:relative;z-index:1;overflow:hidden;padding:20px 100px 0;width:1024px;height:576px;background: #FFF url('../../../../pictures/inner.png') no-repeat right bottom; background-size: 100%; font-size:25px}*/
 
 /*.slide::after{position:absolute;top:0;right:100px;padding-top:15px;width:50px;height:100px;background:url(../images/ribbon.svg) no-repeat;color:#fff;counter-increment:slide;content:counter(slide);text-align:center}*/
 
